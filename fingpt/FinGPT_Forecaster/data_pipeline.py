@@ -19,7 +19,7 @@ def main(args):
     train_ratio = args['train_ratio']
 
     with_basics = True
-    if index_name == "dow":
+    if index_name == "dow": 
         index_name = "DOW-30"
         index = DOW_30
     elif index_name == "euro":

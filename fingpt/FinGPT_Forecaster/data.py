@@ -13,11 +13,17 @@ from collections import defaultdict
 import datasets
 from datasets import Dataset
 from openai import OpenAI
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from indices import *
 from prompt import get_all_prompts
 
-finnhub_client = finnhub.Client(api_key=os.environ.get("FINNHUB_KEY"))
+# Check for specific path if needed, or just rely on default search
+load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
+
+finnhub_client: finnhub.Client = finnhub.Client(api_key=os.environ.get("FINNHUB_KEY"))
 client = OpenAI(api_key=os.environ.get("OPENAI_KEY"))
 
 
@@ -83,6 +89,31 @@ def get_news(symbol, data):
 
 
 def get_basics(symbol, data, start_date, always=False):
+    """
+    通过 Finnhub API 获取指定股票的基本面财务数据（季报），并将其与每周的价格数据对齐。
+    
+    该函数解决了低频财报数据（季度）与高频股价数据（周频）的时间匹配问题。
+    它确保每一周的数据行中包含的是该时间点之前“市场上最新公开可用”的季度财务指标。
+
+    参数:
+    ----------
+    symbol : str
+        股票/数字货币代码 (例如: 'AAPL', 'BTC/USD')。
+    data : pd.DataFrame
+        包含股票价格信息的 DataFrame，必须包含 'End Date' 和 'Start Date' 列。
+    start_date : str
+        数据获取的起始时间（注：函数内部逻辑主要依赖 data 中的 End Date）。
+    always : bool, default False
+        匹配策略开关：
+        - True: 始终匹配最新的一份财报（无论距今多久）。
+        - False: 仅当财报发布日期在当前周的特定窗口期内（约过去两周）才进行匹配。
+          这通常用于捕捉“财报季”期间数据的即时冲击。
+
+    返回值:
+    -------
+    pd.DataFrame
+        新增了 'Basics' 列（存储为 JSON 字符串）的 DataFrame。
+    """
     
     basic_financials = finnhub_client.company_basic_financials(symbol, 'all')
     
