@@ -23,8 +23,15 @@ from prompt import get_all_prompts
 # Check for specific path if needed, or just rely on default search
 load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
+from rate_limiter import finnhub_limiter, yfinance_limiter, openrouter_limiter
+
 finnhub_client: finnhub.Client = finnhub.Client(api_key=os.environ.get("FINNHUB_KEY"))
-client = OpenAI(api_key=os.environ.get("OPENAI_KEY"))
+
+# Use OpenRouter as the default provider for high cost-efficiency (DeepSeek/Claude support)
+client = OpenAI(
+    api_key=os.environ.get("OPENAI_KEY"),
+    base_url="https://openrouter.ai/api/v1"
+)
 
 
 # ----------------------------------------------------------------------------------- #
@@ -42,8 +49,17 @@ def bin_mapping(ret):
 def get_returns(stock_symbol, start_date, end_date):
     # TODO: likely to be merged with get_stock_data
     
+    # Global Rate Limit for yfinance
+    yfinance_limiter.wait_if_needed()
+    
     # Download historical stock data
     stock_data = yf.download(stock_symbol, start=start_date, end=end_date)
+    
+    if isinstance(stock_data.columns, pd.MultiIndex):
+        stock_data.columns = stock_data.columns.get_level_values(0)
+        
+    if 'Adj Close' not in stock_data.columns:
+        stock_data['Adj Close'] = stock_data['Close']
     
     weekly_data = stock_data['Adj Close'].resample('W').ffill()
     weekly_returns = weekly_data.pct_change()[1:]
@@ -71,7 +87,10 @@ def get_news(symbol, data):
         start_date = row['Start Date'].strftime('%Y-%m-%d')
         end_date = row['End Date'].strftime('%Y-%m-%d')
         # print(symbol, ': ', start_date, ' - ', end_date)
-        time.sleep(1) # control qpm
+        
+        # Global Rate Limit for Finnhub
+        finnhub_limiter.wait_if_needed()
+        
         weekly_news = finnhub_client.company_news(symbol, _from=start_date, to=end_date)
         weekly_news = [
             {
@@ -114,6 +133,9 @@ def get_basics(symbol, data, start_date, always=False):
     pd.DataFrame
         新增了 'Basics' 列（存储为 JSON 字符串）的 DataFrame。
     """
+    
+    # Global Rate Limit for Finnhub
+    finnhub_limiter.wait_if_needed()
     
     basic_financials = finnhub_client.company_basic_financials(symbol, 'all')
     
@@ -168,14 +190,14 @@ def prepare_data_for_symbol(symbol, data_dir, start_date, end_date, with_basics=
 
 def append_to_csv(filename, input_data, output_data):
     
-    with open(filename, mode='a', newline='') as file:
+    with open(filename, mode='a', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
         writer.writerow([input_data, output_data])
 
         
 def initialize_csv(filename):
     
-    with open(filename, mode='w', newline='') as file:
+    with open(filename, mode='w', newline='', encoding='utf-8') as file:
         writer = csv.writer(file)
         writer.writerow(["prompt", "answer"])
 
@@ -203,20 +225,29 @@ def query_gpt4(symbol_list, data_dir, start_date, end_date, min_past_weeks=1, ma
 
             # print(f"{symbol} - {i}")
             
+            # Global Rate Limit for OpenRouter
+            openrouter_limiter.wait_if_needed()
+            
             cnt = 0
+            model_name = os.environ.get("OPENAI_MODEL", "deepseek/deepseek-chat")
             while cnt < 5:
                 try:
                     completion = client.chat.completions.create(
-                        model="gpt-4",
+                        model=model_name,
                         messages=[
                             {"role": "system", "content": system_prompt},
                             {"role": "user", "content": prompt}
-                          ]
+                          ],
+                        extra_headers={
+                            "HTTP-Referer": "https://github.com/FinGPT", 
+                            "X-Title": "FinGPT Forecaster",
+                        }
                     )
                     break    
-                except Exception:
+                except Exception as e:
                     cnt += 1
-                    print(f'retry cnt {cnt}')
+                    print(f'retry cnt {cnt} due to: {e}')
+                    time.sleep(2)
             
             answer = completion.choices[0].message.content if cnt < 5 else ""
             append_to_csv(csv_file, prompt, answer)
