@@ -140,6 +140,18 @@ FinGPT_Training_LoRA_with_Chatglm2_6b_for_beginners.ipynb
 # Benchmark data
 fingpt/FinGPT_Benchmark/data/*/**
 
-# FinGPT Forecaster
+# FinGPT Forecaster — 生成的数据与模型权重（体积大，不入库）
+fingpt/FinGPT_Forecaster/data/
+fingpt/FinGPT_Forecaster/finetuned_models/
+
+# FinGPT Forecaster — 运行时状态文件（每次部署/运行都会变化）
+fingpt/FinGPT_Forecaster/model_config.json
+fingpt/FinGPT_Forecaster/pipeline_checkpoint.json
+fingpt/FinGPT_Forecaster/.gradio/
+fingpt/FinGPT_Forecaster/.scheduler.pid
+
+# FinGPT Forecaster — 缓存与测试输出
 fingpt/FinGPT_Forecaster/.rate_limit_cache/
 fingpt/FinGPT_Forecaster/tests/output_data/
+
+# 注：*.log 已由上方第59行规则覆盖（app.log / cron_pipeline.log / training_*.log / scheduler.log）

@@ -50,9 +50,9 @@ def main(args):
     dataset = create_dataset(index, data_dir, start_date, end_date, train_ratio, with_basics=with_basics)
 
     # Save dataset
-    dataset.save_to_disk(
-        f"./data/fingpt-forecaster-{index_name.lower()}-{start_date.replace('-', '')}-{end_date.replace('-', '')}-{min_past_weeks}-{max_past_weeks}-{str(train_ratio).replace('.', '')}"
-    )
+    dataset_save_path = f"./data/fingpt-forecaster-{index_name.lower()}-{start_date.replace('-', '')}-{end_date.replace('-', '')}-{min_past_weeks}-{max_past_weeks}-{str(train_ratio).replace('.', '')}"
+    dataset.save_to_disk(dataset_save_path)
+    return os.path.abspath(dataset_save_path)
 
 
 if __name__ == "__main__":

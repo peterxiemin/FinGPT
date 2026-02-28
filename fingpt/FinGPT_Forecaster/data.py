@@ -25,9 +25,20 @@ load_dotenv(os.path.join(os.path.dirname(__file__), ".env"))
 
 from rate_limiter import finnhub_limiter, yfinance_limiter, openrouter_limiter
 
-finnhub_client: finnhub.Client = finnhub.Client(api_key=os.environ.get("FINNHUB_KEY"))
+# Proxy configuration
+proxy = os.environ.get("HTTP_PROXY")
+proxies = {'http': proxy, 'https': proxy} if proxy else None
+
+if proxy:
+    yf.set_config(proxy=proxy)
+
+finnhub_client: finnhub.Client = finnhub.Client(
+    api_key=os.environ.get("FINNHUB_KEY"),
+    proxies=proxies
+)
 
 # Use OpenRouter as the default provider for high cost-efficiency (DeepSeek/Claude support)
+# OpenAI client usually respects HTTP_PROXY environment variable automatically
 client = OpenAI(
     api_key=os.environ.get("OPENAI_KEY"),
     base_url="https://openrouter.ai/api/v1"
@@ -91,7 +102,17 @@ def get_news(symbol, data):
         # Global Rate Limit for Finnhub
         finnhub_limiter.wait_if_needed()
         
-        weekly_news = finnhub_client.company_news(symbol, _from=start_date, to=end_date)
+        # Retry logic for Finnhub API
+        for attempt in range(3):
+            try:
+                weekly_news = finnhub_client.company_news(symbol, _from=start_date, to=end_date)
+                break
+            except Exception as e:
+                print(f"Finnhub API news fetching failed (attempt {attempt + 1}): {e}")
+                time.sleep(2)
+        else:
+            weekly_news = []
+
         weekly_news = [
             {
                 "date": datetime.fromtimestamp(n['datetime']).strftime('%Y%m%d%H%M%S'),
@@ -137,7 +158,17 @@ def get_basics(symbol, data, start_date, always=False):
     # Global Rate Limit for Finnhub
     finnhub_limiter.wait_if_needed()
     
-    basic_financials = finnhub_client.company_basic_financials(symbol, 'all')
+    # Retry logic for Finnhub API
+    for attempt in range(3):
+        try:
+            basic_financials = finnhub_client.company_basic_financials(symbol, 'all')
+            break
+        except Exception as e:
+            print(f"Finnhub API basic financials fetching failed (attempt {attempt + 1}): {e}")
+            time.sleep(2)
+    else:
+        basic_financials = {'series': {'quarterly': {}}}
+
     
     final_basics, basic_list, basic_dict = [], [], defaultdict(dict)
     
@@ -206,8 +237,11 @@ def query_gpt4(symbol_list, data_dir, start_date, end_date, min_past_weeks=1, ma
 
     for symbol in tqdm(symbol_list):
         
-        csv_file = f'{data_dir}/{symbol}_{start_date}_{end_date}_gpt-4.csv' if with_basics else \
-                   f'{data_dir}/{symbol}_{start_date}_{end_date}_nobasics_gpt-4.csv'
+        model_name = os.environ.get("OPENAI_MODEL", "deepseek/deepseek-chat")
+        model_suffix = model_name.split('/')[-1]
+        
+        csv_file = f'{data_dir}/{symbol}_{start_date}_{end_date}_{model_suffix}.csv' if with_basics else \
+                   f'{data_dir}/{symbol}_{start_date}_{end_date}_nobasics_{model_suffix}.csv'
         
         if not os.path.exists(csv_file):
             initialize_csv(csv_file)
@@ -271,8 +305,11 @@ SYSTEM_PROMPTS = {
 
 def gpt4_to_llama(symbol, data_dir, start_date, end_date, with_basics=True):
 
-    csv_file = f'{data_dir}/{symbol}_{start_date}_{end_date}_gpt-4.csv' if with_basics else \
-                   f'{data_dir}/{symbol}_{start_date}_{end_date}_nobasics_gpt-4.csv'
+    model_name = os.environ.get("OPENAI_MODEL", "deepseek/deepseek-chat")
+    model_suffix = model_name.split('/')[-1]
+    
+    csv_file = f'{data_dir}/{symbol}_{start_date}_{end_date}_{model_suffix}.csv' if with_basics else \
+                   f'{data_dir}/{symbol}_{start_date}_{end_date}_nobasics_{model_suffix}.csv'
     
     df = pd.read_csv(csv_file)
     
@@ -294,7 +331,7 @@ def gpt4_to_llama(symbol, data_dir, start_date, end_date, with_basics=True):
         )
         try:
             answer = re.sub(
-                r"\[Prediction & Analysis\]:\s*",
+                r"(?i)(?:###\s*)?\[?Prediction\s*&\s*Analysis\]?:?\**\s*",
                 f"[Prediction & Analysis]:\nPrediction: {label.capitalize()}\nAnalysis: ",
                 answer
             )
@@ -345,7 +382,17 @@ def create_dataset(symbol_list, data_dir, start_date, end_date, train_ratio=0.8,
         test_dataset_list.append(dataset.select(range(train_size, len(dataset))))
 
     train_dataset = datasets.concatenate_datasets(train_dataset_list)
-    test_dataset = datasets.concatenate_datasets(test_dataset_list)
+    if len(train_dataset) == 0:
+        raise ValueError(
+            "No training samples were generated. The date range may be too short "
+            "(need at least min_past_weeks+1 weekly records per symbol)."
+        )
+    if test_dataset_list:
+        test_dataset = datasets.concatenate_datasets(test_dataset_list)
+    else:
+        # All samples went to train (e.g. very short date range); create an empty
+        # test split with the same schema so downstream code doesn't crash.
+        test_dataset = train_dataset.select([])
 
     dataset = datasets.DatasetDict({
         'train': train_dataset,

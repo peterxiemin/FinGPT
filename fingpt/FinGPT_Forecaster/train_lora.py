@@ -1,5 +1,5 @@
 from transformers.integrations import TensorBoardCallback
-from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM
+from transformers import AutoTokenizer, AutoModel, AutoModelForCausalLM, BitsAndBytesConfig
 from transformers import TrainingArguments, Trainer, DataCollatorForSeq2Seq
 from transformers import TrainerCallback, TrainerState, TrainerControl
 from transformers.trainer import TRAINING_ARGS_NAME
@@ -15,6 +15,9 @@ from datetime import datetime
 from functools import partial
 from tqdm import tqdm
 from utils import *
+from dotenv import load_dotenv
+
+load_dotenv()
 
 # LoRA
 from peft import (
@@ -22,19 +25,22 @@ from peft import (
     LoraConfig,
     get_peft_model,
     get_peft_model_state_dict,
-    prepare_model_for_int8_training,
+    prepare_model_for_kbit_training,
     set_peft_model_state_dict,   
 )
 
-# Replace with your own api_key and project name
-os.environ['WANDB_API_KEY'] = ''    # TODO: Replace with your environment variable
-os.environ['WANDB_PROJECT'] = 'fingpt-forecaster'
+# Replace with your own api_key and project name (Respect environment variables if set)
+if not os.environ.get('WANDB_API_KEY'):
+    os.environ['WANDB_API_KEY'] = ''    # TODO: Replace with your environment variable
+if not os.environ.get('WANDB_PROJECT'):
+    os.environ['WANDB_PROJECT'] = 'fingpt-forecaster'
 
 
 class GenerationEvalCallback(TrainerCallback):
     
-    def __init__(self, eval_dataset, ignore_until_epoch=0):
+    def __init__(self, eval_dataset, tokenizer, ignore_until_epoch=0):
         self.eval_dataset = eval_dataset
+        self.tokenizer = tokenizer
         self.ignore_until_epoch = ignore_until_epoch
     
     def on_evaluate(self, args, state: TrainerState, control: TrainerControl, **kwargs):
@@ -44,7 +50,7 @@ class GenerationEvalCallback(TrainerCallback):
             
         if state.is_local_process_zero:
             model = kwargs['model']
-            tokenizer = kwargs['tokenizer']
+            tokenizer = self.tokenizer
             generated_texts, reference_texts = [], []
 
             for feature in tqdm(self.eval_dataset):
@@ -58,7 +64,8 @@ class GenerationEvalCallback(TrainerCallback):
                 
                 res = model.generate(
                     **inputs, 
-                    use_cache=True
+                    use_cache=True,
+                    max_new_tokens=512
                 )
                 output = tokenizer.decode(res[0], skip_special_tokens=True)
                 answer = re.sub(r'.*\[/INST\]\s*', '', output, flags=re.DOTALL)
@@ -83,10 +90,22 @@ def main(args):
         
     model_name = parse_model_name(args.base_model, args.from_remote)
     
+    # quantization config
+    quantization_config = None
+    if args.load_in_4bit:
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_use_double_quant=True,
+        )
+    elif args.load_in_8bit:
+        quantization_config = BitsAndBytesConfig(load_in_8bit=True)
+
     # load model
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        # load_in_8bit=True,
+        quantization_config=quantization_config,
         trust_remote_code=True
     )
     if args.local_rank == 0:
@@ -97,20 +116,20 @@ def main(args):
     tokenizer.padding_side = "right"
     
     # load data
-    dataset_fname = "./data/" + args.dataset
+    dataset_fname = args.dataset
     dataset_list = load_dataset(dataset_fname, args.from_remote)
     
     dataset_train = datasets.concatenate_datasets([d['train'] for d in dataset_list]).shuffle(seed=42)
     
     if args.test_dataset:
-        test_dataset_fname = "./data/" + args.test_dataset
+        test_dataset_fname = args.test_dataset
         dataset_list = load_dataset(test_dataset_fname, args.from_remote)
             
     dataset_test = datasets.concatenate_datasets([d['test'] for d in dataset_list])
     
     original_dataset = datasets.DatasetDict({'train': dataset_train, 'test': dataset_test})
     
-    eval_dataset = original_dataset['test'].shuffle(seed=42).select(range(50))
+    eval_dataset = original_dataset['test'].shuffle(seed=42).select(range(min(len(original_dataset['test']), 50)))
     
     dataset = original_dataset.map(partial(tokenize, args, tokenizer))
     print('original dataset length: ', len(dataset['train']))
@@ -137,9 +156,9 @@ def main(args):
         lr_scheduler_type=args.scheduler,
         save_steps=args.eval_steps,
         eval_steps=args.eval_steps,
-        fp16=True,
-        deepspeed=args.ds_config,
-        evaluation_strategy=args.evaluation_strategy,
+        bf16=True,
+        deepspeed=args.ds_config if args.ds_config.lower() != 'none' else None,
+        eval_strategy=args.evaluation_strategy,
         remove_unused_columns=False,
         report_to='wandb',
         run_name=args.run_name
@@ -151,7 +170,7 @@ def main(args):
     model.model_parallel = True
     model.model.config.use_cache = False
     
-    # model = prepare_model_for_int8_training(model)
+    # model = prepare_model_for_kbit_training(model)
 
     # setup peft
     peft_config = LoraConfig(
@@ -179,6 +198,7 @@ def main(args):
         callbacks=[
             GenerationEvalCallback(
                 eval_dataset=eval_dataset,
+                tokenizer=tokenizer,
                 ignore_until_epoch=round(0.3 * args.num_epochs)
             )
         ]
@@ -192,6 +212,9 @@ def main(args):
 
     # save model
     model.save_pretrained(training_args.output_dir)
+    abs_output_dir = os.path.abspath(training_args.output_dir)
+    print(f"TRAINED_MODEL_PATH: {abs_output_dir}")
+    return abs_output_dir
 
 
 if __name__ == "__main__":
@@ -201,7 +224,7 @@ if __name__ == "__main__":
     parser.add_argument("--run_name", default='local-test', type=str)
     parser.add_argument("--dataset", required=True, type=str)
     parser.add_argument("--test_dataset", type=str)
-    parser.add_argument("--base_model", required=True, type=str, choices=['chatglm2', 'llama2'])
+    parser.add_argument("--base_model", required=True, type=str, choices=['chatglm2', 'llama2', 'llama3'])
     parser.add_argument("--max_length", default=512, type=int)
     parser.add_argument("--batch_size", default=4, type=int, help="The train batch size per device")
     parser.add_argument("--learning_rate", default=1e-4, type=float, help="The learning rate")
@@ -217,7 +240,10 @@ if __name__ == "__main__":
     parser.add_argument("--evaluation_strategy", default='steps', type=str)    
     parser.add_argument("--eval_steps", default=0.1, type=float)    
     parser.add_argument("--from_remote", default=False, type=bool)    
+    parser.add_argument("--load_in_4bit", action='store_true')
+    parser.add_argument("--load_in_8bit", action='store_true')
     args = parser.parse_args()
     
-    wandb.login()
+    if os.environ.get('WANDB_MODE') != 'disabled':
+        wandb.login()
     main(args)
