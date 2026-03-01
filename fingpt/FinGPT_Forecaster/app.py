@@ -5,36 +5,77 @@ import json
 import random
 import finnhub
 import torch
+from dotenv import load_dotenv
+
+load_dotenv()
 import gradio as gr
 import pandas as pd
 import yfinance as yf
+# import pandas_datareader.data as web
 from pynvml import *
 from peft import PeftModel
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 from transformers import AutoTokenizer, AutoModelForCausalLM, TextStreamer
 
+from rate_limiter import finnhub_limiter, yfinance_limiter
+
 
 access_token = os.environ["HF_TOKEN"]
-finnhub_client = finnhub.Client(api_key=os.environ["FINNHUB_API_KEY"])
+
+# Proxy configuration
+proxy = os.environ.get("HTTP_PROXY")
+proxies = {'http': proxy, 'https': proxy} if proxy else None
+
+# Note: yfinance no longer supports set_config() in recent versions
+# Proxy configuration for yfinance is handled via environment variables if needed
+
+finnhub_client = finnhub.Client(
+    api_key=os.environ.get("FINNHUB_API_KEY", os.environ.get("FINNHUB_KEY")),
+    proxies=proxies
+)
+
+# Configuration for dynamic model loading
+MODEL_CONFIG_FILE = "model_config.json"
+DEFAULT_BASE_MODEL = "meta-llama/Meta-Llama-3.1-8B-Instruct" 
+DEFAULT_LORA_WEIGHTS = 'FinGPT/fingpt-forecaster_dow30_llama2-7b_lora'
+
+base_model_name = DEFAULT_BASE_MODEL
+lora_weights_path = DEFAULT_LORA_WEIGHTS
+
+if os.path.exists(MODEL_CONFIG_FILE):
+    try:
+        with open(MODEL_CONFIG_FILE, "r") as f:
+            config = json.load(f)
+            if "latest_model_path" in config:
+                lora_weights_path = config["latest_model_path"]
+                print(f"Loaded dynamic model weights from config: {lora_weights_path}")
+    except Exception as e:
+        print(f"Error reading model config: {e}")
 
 base_model = AutoModelForCausalLM.from_pretrained(
-    'meta-llama/Llama-2-7b-chat-hf',
+    '/model/llm/Meta-Llama-3.1-8B-Instruct',
     token=access_token,
     trust_remote_code=True, 
     device_map="auto",
     torch_dtype=torch.float16,
     offload_folder="offload/"
 )
-model = PeftModel.from_pretrained(
-    base_model,
-    'FinGPT/fingpt-forecaster_dow30_llama2-7b_lora',
-    offload_folder="offload/"
-)
-model = model.eval()
+
+try:
+    model = PeftModel.from_pretrained(
+        base_model,
+        lora_weights_path,
+        offload_folder="offload/"
+    )
+    model = model.eval()
+    print(f"Successfully loaded LoRA weights from {lora_weights_path}")
+except Exception as e:
+    print(f"Failed to load LoRA weights. Error: {e}")
+    model = base_model.eval()
 
 tokenizer = AutoTokenizer.from_pretrained(
-    'meta-llama/Llama-2-7b-chat-hf',
+    '/model/llm/Meta-Llama-3.1-8B-Instruct',
     token=access_token
 )
 
@@ -69,24 +110,30 @@ def n_weeks_before(date_string, n):
 
 def get_stock_data(stock_symbol, steps):
 
-    stock_data = yf.download(stock_symbol, steps[0], steps[-1])
+    try:
+        yfinance_limiter.wait_if_needed()
+        stock_data = yf.download(stock_symbol, steps[0], steps[-1])
+    except Exception as e:
+        raise gr.Error(f"Failed to download stock price data for symbol {stock_symbol} from yfinance! Error: {str(e)}")
+
     if len(stock_data) == 0:
         raise gr.Error(f"Failed to download stock price data for symbol {stock_symbol} from yfinance!")
     
-#     print(stock_data)
-    
     dates, prices = [], []
-    available_dates = stock_data.index.format()
+    available_dates = stock_data.index.astype(str).tolist()
     
     for date in steps[:-1]:
         for i in range(len(stock_data)):
             if available_dates[i] >= date:
-                prices.append(stock_data['Close'][i])
+                prices.append(float(stock_data['Close'].iloc[i]))
                 dates.append(datetime.strptime(available_dates[i], "%Y-%m-%d"))
                 break
 
+    if not prices:
+        raise gr.Error(f"No price data available for {stock_symbol} in the requested date range.")
+
     dates.append(datetime.strptime(available_dates[-1], "%Y-%m-%d"))
-    prices.append(stock_data['Close'][-1])
+    prices.append(float(stock_data['Close'].iloc[-1]))
     
     return pd.DataFrame({
         "Start Date": dates[:-1], "End Date": dates[1:],
@@ -102,7 +149,7 @@ def get_news(symbol, data):
         start_date = row['Start Date'].strftime('%Y-%m-%d')
         end_date = row['End Date'].strftime('%Y-%m-%d')
 #         print(symbol, ': ', start_date, ' - ', end_date)
-        time.sleep(1) # control qpm
+        finnhub_limiter.wait_if_needed()
         weekly_news = finnhub_client.company_news(symbol, _from=start_date, to=end_date)
         if len(weekly_news) == 0:
             raise gr.Error(f"No company news found for symbol {symbol} from finnhub!")
@@ -123,6 +170,7 @@ def get_news(symbol, data):
 
 def get_company_prompt(symbol):
 
+    finnhub_limiter.wait_if_needed()
     profile = finnhub_client.company_profile2(symbol=symbol)
     if not profile:
         raise gr.Error(f"Failed to find company profile for symbol {symbol} from finnhub!")
@@ -144,7 +192,8 @@ def get_prompt_by_row(symbol, row):
         start_date, end_date, symbol, term, row['Start Price'], row['End Price'])
     
     news = json.loads(row["News"])
-    news = ["[Headline]: {}\n[Summary]: {}\n".format(
+    news = ["[Time]: {}-{}-{} {}:{}\n[Headline]: {}\n[Summary]: {}\n".format(
+        n['date'][:4], n['date'][4:6], n['date'][6:8], n['date'][8:10], n['date'][10:12],
         n['headline'], n['summary']) for n in news if n['date'][:8] <= end_date.replace('-', '') and \
         not n['summary'].startswith("Looking for stock market analysis and research with proves results?")]
 
@@ -165,6 +214,7 @@ def sample_news(news, k=5):
 
 def get_current_basics(symbol, curday):
 
+    finnhub_limiter.wait_if_needed()
     basic_financials = finnhub_client.company_basic_financials(symbol, 'all')
     if not basic_financials['series']:
         raise gr.Error(f"Failed to find basic financials for symbol {symbol} from finnhub!")
@@ -253,14 +303,15 @@ def predict(ticker, date, n_weeks, use_basics):
     info, prompt = construct_prompt(ticker, date, n_weeks, use_basics)
       
     inputs = tokenizer(
-        prompt, return_tensors='pt', padding=False
+        prompt, return_tensors='pt', padding=False, 
+        truncation=True, max_length=3072 # Leave ~1k for output
     )
     inputs = {key: value.to(model.device) for key, value in inputs.items()}
 
     print("Inputs loaded onto devices.")
         
     res = model.generate(
-        **inputs, max_length=4096, do_sample=True,
+        **inputs, max_new_tokens=1024, do_sample=True,
         eos_token_id=tokenizer.eos_token_id,
         use_cache=True, streamer=streamer
     )
@@ -317,4 +368,4 @@ For more detailed and customized implementation, refer to our FinGPT project: <h
 """
 )
 
-demo.launch()
+demo.launch(share=False)

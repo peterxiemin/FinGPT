@@ -29,8 +29,8 @@ from rate_limiter import finnhub_limiter, yfinance_limiter, openrouter_limiter
 proxy = os.environ.get("HTTP_PROXY")
 proxies = {'http': proxy, 'https': proxy} if proxy else None
 
-if proxy:
-    yf.set_config(proxy=proxy)
+# Note: yfinance no longer supports set_config() in recent versions
+# Proxy configuration is handled automatically via HTTP_PROXY/HTTPS_PROXY environment variables
 
 finnhub_client: finnhub.Client = finnhub.Client(
     api_key=os.environ.get("FINNHUB_KEY"),

@@ -1,14 +1,29 @@
 import os
 import finnhub
 import yfinance as yf
+# import pandas_datareader.data as web
 import pandas as pd
 from datetime import date, datetime, timedelta
 from collections import defaultdict
+from dotenv import load_dotenv
+
+load_dotenv()
 
 from data import get_news
 from prompt import get_company_prompt, get_prompt_by_row, sample_news
+from rate_limiter import finnhub_limiter, yfinance_limiter
 
-finnhub_client = finnhub.Client(api_key=os.environ.get("FINNHUB_KEY"))
+# Proxy configuration
+proxy = os.environ.get("HTTP_PROXY")
+proxies = {'http': proxy, 'https': proxy} if proxy else None
+
+# Note: yfinance no longer supports set_config() in recent versions
+# Proxy configuration is handled automatically via HTTP_PROXY/HTTPS_PROXY environment variables
+
+finnhub_client = finnhub.Client(
+    api_key=os.environ.get("FINNHUB_KEY"),
+    proxies=proxies
+)
 
 
 def get_curday():
@@ -25,22 +40,31 @@ def n_weeks_before(date_string, n):
 
 def get_stock_data(stock_symbol, steps):
 
-    stock_data = yf.download(stock_symbol, steps[0], steps[-1])
-    
-#     print(stock_data)
+    try:
+        yfinance_limiter.wait_if_needed()
+        stock_data = yf.download(stock_symbol, steps[0], steps[-1])
+    except Exception as e:
+        print(f"Failed to download stock price data for symbol {stock_symbol} from yfinance! Error: {str(e)}")
+        return pd.DataFrame()
+            
+    if len(stock_data) == 0:
+        return pd.DataFrame()
     
     dates, prices = [], []
-    available_dates = stock_data.index.format()
+    available_dates = stock_data.index.astype(str).tolist()
     
     for date in steps[:-1]:
         for i in range(len(stock_data)):
             if available_dates[i] >= date:
-                prices.append(stock_data['Close'][i])
+                prices.append(float(stock_data['Close'].iloc[i]))
                 dates.append(datetime.strptime(available_dates[i], "%Y-%m-%d"))
                 break
 
+    if not prices:
+        return pd.DataFrame()
+
     dates.append(datetime.strptime(available_dates[-1], "%Y-%m-%d"))
-    prices.append(stock_data['Close'][-1])
+    prices.append(float(stock_data['Close'].iloc[-1]))
     
     return pd.DataFrame({
         "Start Date": dates[:-1], "End Date": dates[1:],
@@ -50,6 +74,7 @@ def get_stock_data(stock_symbol, steps):
 
 def get_current_basics(symbol, curday):
 
+    finnhub_limiter.wait_if_needed()
     basic_financials = finnhub_client.company_basic_financials(symbol, 'all')
     
     final_basics, basic_list, basic_dict = [], [], defaultdict(dict)

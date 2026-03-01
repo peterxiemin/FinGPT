@@ -7,12 +7,27 @@ import pandas as pd
 from openai import OpenAI
 
 from indices import *
+from rate_limiter import finnhub_limiter, yfinance_limiter
+from dotenv import load_dotenv
 
-finnhub_client = finnhub.Client(api_key=os.environ.get("FINNHUB_KEY"))
+load_dotenv()
+
+# Proxy configuration
+proxy = os.environ.get("HTTP_PROXY")
+proxies = {'http': proxy, 'https': proxy} if proxy else None
+
+# Note: yfinance no longer supports set_config() in recent versions
+# Proxy configuration is handled automatically via HTTP_PROXY/HTTPS_PROXY environment variables
+
+finnhub_client = finnhub.Client(
+    api_key=os.environ.get("FINNHUB_KEY"),
+    proxies=proxies
+)
 
 
 def get_company_prompt(symbol):
     
+    finnhub_limiter.wait_if_needed()
     profile = finnhub_client.company_profile2(symbol=symbol)
 
     company_template = "[Company Introduction]:\n\n{name} is a leading entity in the {finnhubIndustry} sector. Incorporated and publicly traded since {ipo}, the company has established its reputation as one of the key players in the market. As of today, {name} has a market capitalization of {marketCapitalization:.2f} in {currency}, with {shareOutstanding:.2f} shares outstanding." \
@@ -25,6 +40,7 @@ def get_company_prompt(symbol):
 
 def get_crypto_prompt(symbol):
 
+    yfinance_limiter.wait_if_needed()
     profile = yf.Ticker(symbol).info
 
     crpyto_template = """[Cryptocurrency Introduction]: {description}. It has a market capilization of {marketCap}."""
@@ -43,7 +59,8 @@ def get_prompt_by_row(symbol, row):
         start_date, end_date, symbol, term, row['Start Price'], row['End Price'])
     
     news = json.loads(row["News"])
-    news = ["[Headline]: {}\n[Summary]: {}\n".format(
+    news = ["[Time]: {}-{}-{} {}:{}\n[Headline]: {}\n[Summary]: {}\n".format(
+        n['date'][:4], n['date'][4:6], n['date'][6:8], n['date'][8:10], n['date'][10:12],
         n['headline'], n['summary']) for n in news if n['date'][:8] <= end_date.replace('-', '') and \
         not n['summary'].startswith("Looking for stock market analysis and research with proves results?")]
 
@@ -66,7 +83,8 @@ def get_crypto_prompt_by_row(symbol, row):
         start_date, end_date, symbol, term, row['Start Price'], row['End Price'])
     
     news = json.loads(row["News"])
-    news = ["[Headline]: {}\n[Summary]: {}\n".format(
+    news = ["[Time]: {}-{}-{} {}:{}\n[Headline]: {}\n[Summary]: {}\n".format(
+        n['date'][:4], n['date'][4:6], n['date'][6:8], n['date'][8:10], n['date'][10:12],
         n['headline'], n['summary']) for n in news if n['date'][:8] <= end_date.replace('-', '') and \
         not n['summary'].startswith("Looking for stock market analysis and research with proves results?")]
 
