@@ -1,4 +1,4 @@
-"""Tests for cron_pipeline.py time window logic."""
+"""Tests for cron_pipeline.py time window logic, checkpoint management, and eval helpers."""
 import os
 import sys
 import json
@@ -10,7 +10,12 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from cron_pipeline import get_time_window
+from cron_pipeline import (
+    get_time_window,
+    _update_checkpoint_dataset_paths,
+    _parse_eval_metrics,
+    _save_eval_history,
+)
 
 
 class TestTimeWindowNonOverlap:
@@ -32,7 +37,7 @@ class TestTimeWindowNonOverlap:
         # No checkpoint exists yet
         assert not os.path.exists("pipeline_checkpoint.json")
 
-        start_str, end_str = get_time_window(weeks_back=2)
+        start_str, end_str, _ = get_time_window(weeks_back=2)
         start_date = datetime.fromisoformat(start_str)
         end_date = datetime.fromisoformat(end_str)
 
@@ -48,7 +53,7 @@ class TestTimeWindowNonOverlap:
     def test_second_run_continues_from_first_end(self):
         """Second run should start from where first run ended (no overlap)."""
         # First run
-        start1_str, end1_str = get_time_window(weeks_back=2)
+        start1_str, end1_str, _ = get_time_window(weeks_back=2)
         start1 = datetime.fromisoformat(start1_str)
         end1 = datetime.fromisoformat(end1_str)
 
@@ -67,7 +72,7 @@ class TestTimeWindowNonOverlap:
                 "index_name": "dow"
             }, f)
 
-        start2_str, end2_str = get_time_window(weeks_back=2)
+        start2_str, end2_str, _ = get_time_window(weeks_back=2)
         start2 = datetime.fromisoformat(start2_str)
         end2 = datetime.fromisoformat(end2_str)
 
@@ -87,7 +92,7 @@ class TestTimeWindowNonOverlap:
         # Week 1: Run on Sunday, get data from [Sun-14 to Sun]
         # Week 2: Run on next Sunday, should get data from [Sun to Sun+7]
 
-        start1_str, end1_str = get_time_window(weeks_back=2)
+        start1_str, end1_str, _ = get_time_window(weeks_back=2)
         start1 = datetime.fromisoformat(start1_str)
         end1 = datetime.fromisoformat(end1_str)
 
@@ -116,7 +121,7 @@ class TestTimeWindowNonOverlap:
 
     def test_checkpoint_persistence(self):
         """Verify checkpoint file is correctly saved and loaded."""
-        start1_str, end1_str = get_time_window(weeks_back=2)
+        start1_str, end1_str, _ = get_time_window(weeks_back=2)
 
         # Verify checkpoint file exists and is valid JSON
         assert os.path.exists("pipeline_checkpoint.json"), "Checkpoint file should exist"
@@ -127,6 +132,8 @@ class TestTimeWindowNonOverlap:
         # Verify checkpoint has required fields
         assert "last_end_date" in checkpoint
         assert "last_run_time" in checkpoint
+        assert "dataset_paths" in checkpoint, "Checkpoint should contain dataset_paths field"
+        assert isinstance(checkpoint["dataset_paths"], list), "dataset_paths should be a list"
 
         # Verify the date part matches (checkpoint stores full datetime, end1_str is just date)
         checkpoint_date = checkpoint["last_end_date"].split("T")[0]
@@ -156,7 +163,7 @@ class TestTimeWindowEdgeCases:
             f.write("{ invalid json }")
 
         # Should not crash, should fall back to weeks_back
-        start_str, end_str = get_time_window(weeks_back=2)
+        start_str, end_str, _ = get_time_window(weeks_back=2)
         start = datetime.fromisoformat(start_str)
         end = datetime.fromisoformat(end_str)
 
@@ -172,7 +179,7 @@ class TestTimeWindowEdgeCases:
             json.dump({"index_name": "dow"}, f)
 
         # Should not crash, should fall back to weeks_back
-        start_str, end_str = get_time_window(weeks_back=3)
+        start_str, end_str, _ = get_time_window(weeks_back=3)
         start = datetime.fromisoformat(start_str)
         end = datetime.fromisoformat(end_str)
 
@@ -180,6 +187,237 @@ class TestTimeWindowEdgeCases:
         assert delta_days == 21, f"Should fall back to weeks_back=3 (21 days), got {delta_days}"
 
         print(f"✓ Missing last_end_date recovery: fell back to weeks_back (delta={delta_days} days)")
+
+
+class TestGetTimeWindowDatasetPaths:
+    """Test get_time_window() dataset_paths return value and checkpoint round-trip."""
+
+    def setup_method(self):
+        self.test_dir = tempfile.mkdtemp(prefix="cron_test_")
+        self.original_dir = os.getcwd()
+        os.chdir(self.test_dir)
+
+    def teardown_method(self):
+        os.chdir(self.original_dir)
+        shutil.rmtree(self.test_dir)
+
+    def test_first_run_returns_empty_paths(self):
+        """First run with no checkpoint should return an empty dataset_paths list."""
+        _, _, paths = get_time_window(weeks_back=2)
+        assert paths == [], f"First run should return empty paths list, got {paths}"
+
+    def test_loads_dataset_paths_from_checkpoint(self):
+        """Should read dataset_paths from an existing checkpoint."""
+        existing_paths = ["/data/dataset-run1", "/data/dataset-run2"]
+        with open("pipeline_checkpoint.json", "w") as f:
+            json.dump({
+                "last_end_date": (datetime.now() - timedelta(days=7)).isoformat(),
+                "last_run_time": datetime.now().isoformat(),
+                "index_name": "dow",
+                "dataset_paths": existing_paths,
+            }, f)
+
+        _, _, paths = get_time_window(weeks_back=2)
+        assert paths == existing_paths, f"Should return existing paths {existing_paths}, got {paths}"
+
+    def test_preserves_dataset_paths_when_writing_checkpoint(self):
+        """Writing the checkpoint for the next run must not erase existing dataset_paths."""
+        existing_paths = ["/data/dataset-run1"]
+        with open("pipeline_checkpoint.json", "w") as f:
+            json.dump({
+                "last_end_date": (datetime.now() - timedelta(days=7)).isoformat(),
+                "last_run_time": datetime.now().isoformat(),
+                "index_name": "dow",
+                "dataset_paths": existing_paths,
+            }, f)
+
+        get_time_window(weeks_back=2)
+
+        with open("pipeline_checkpoint.json") as f:
+            checkpoint = json.load(f)
+        assert checkpoint["dataset_paths"] == existing_paths, (
+            "dataset_paths must be preserved in checkpoint after get_time_window()"
+        )
+
+    def test_corrupted_checkpoint_returns_empty_paths(self):
+        """Corrupted checkpoint should fall back gracefully and return empty paths."""
+        with open("pipeline_checkpoint.json", "w") as f:
+            f.write("{ bad json }")
+
+        _, _, paths = get_time_window(weeks_back=2)
+        assert paths == [], f"Corrupted checkpoint should yield empty paths, got {paths}"
+
+
+class TestUpdateCheckpointDatasetPaths:
+    """Test _update_checkpoint_dataset_paths() in isolation."""
+
+    def setup_method(self):
+        self.test_dir = tempfile.mkdtemp(prefix="cron_test_")
+        self.original_dir = os.getcwd()
+        os.chdir(self.test_dir)
+
+    def teardown_method(self):
+        os.chdir(self.original_dir)
+        shutil.rmtree(self.test_dir)
+
+    def test_updates_paths_in_existing_checkpoint(self):
+        """Should overwrite dataset_paths while keeping the file valid."""
+        with open("pipeline_checkpoint.json", "w") as f:
+            json.dump({"last_end_date": "2026-03-01T00:00:00", "dataset_paths": []}, f)
+
+        new_paths = ["/data/ds1", "/data/ds2"]
+        _update_checkpoint_dataset_paths(new_paths)
+
+        with open("pipeline_checkpoint.json") as f:
+            checkpoint = json.load(f)
+        assert checkpoint["dataset_paths"] == new_paths
+
+    def test_preserves_other_checkpoint_fields(self):
+        """Other checkpoint fields (last_end_date etc.) must survive the update."""
+        original = {
+            "last_end_date": "2026-03-01T02:00:00",
+            "last_run_time": "2026-03-01T02:05:00",
+            "index_name": "dow",
+            "dataset_paths": [],
+        }
+        with open("pipeline_checkpoint.json", "w") as f:
+            json.dump(original, f)
+
+        _update_checkpoint_dataset_paths(["/data/ds-new"])
+
+        with open("pipeline_checkpoint.json") as f:
+            checkpoint = json.load(f)
+        assert checkpoint["last_end_date"] == original["last_end_date"]
+        assert checkpoint["last_run_time"] == original["last_run_time"]
+        assert checkpoint["index_name"] == original["index_name"]
+        assert checkpoint["dataset_paths"] == ["/data/ds-new"]
+
+    def test_creates_checkpoint_if_missing(self):
+        """Should create the checkpoint file from scratch if it does not exist."""
+        assert not os.path.exists("pipeline_checkpoint.json")
+        paths = ["/data/ds1"]
+        _update_checkpoint_dataset_paths(paths)
+        assert os.path.exists("pipeline_checkpoint.json")
+        with open("pipeline_checkpoint.json") as f:
+            checkpoint = json.load(f)
+        assert checkpoint["dataset_paths"] == paths
+
+
+class TestParseEvalMetrics:
+    """Test _parse_eval_metrics() JSON sentinel parsing."""
+
+    def setup_method(self):
+        self.test_dir = tempfile.mkdtemp(prefix="cron_test_")
+        self.original_dir = os.getcwd()
+        os.chdir(self.test_dir)
+
+    def teardown_method(self):
+        os.chdir(self.original_dir)
+        shutil.rmtree(self.test_dir)
+
+    def _write_log(self, content, filename="train.log"):
+        with open(filename, "w") as f:
+            f.write(content)
+        return filename
+
+    def _sentinel(self, metrics_dict):
+        """Build a log line the way train_lora.py emits it."""
+        return f"EVAL_METRICS_JSON: {json.dumps(metrics_dict)}\n"
+
+    def test_parses_all_metrics_from_sentinel(self):
+        """Should extract all fields from the EVAL_METRICS_JSON sentinel line."""
+        full_metrics = {
+            "valid_count": 45,
+            "bin_acc": 0.78,
+            "mse": 1.23,
+            "pros_rouge_scores": {"rouge1": 0.45, "rouge2": 0.23, "rougeL": 0.42},
+            "cons_rouge_scores": {"rouge1": 0.38, "rouge2": 0.15, "rougeL": 0.35},
+            "anal_rouge_scores": {"rouge1": 0.50, "rouge2": 0.28, "rougeL": 0.48},
+        }
+        log = self._write_log("Epoch 1/3\n" + self._sentinel(full_metrics) + "Done.\n")
+        metrics = _parse_eval_metrics(log)
+        assert metrics["bin_acc"] == 0.78
+        assert metrics["mse"] == 1.23
+        assert metrics["valid_count"] == 45
+        assert metrics["pros_rouge_scores"]["rouge1"] == 0.45
+        assert metrics["anal_rouge_scores"]["rougeL"] == 0.48
+
+    def test_returns_last_sentinel_when_multiple(self):
+        """When several EVAL_METRICS_JSON lines exist, the last one should win."""
+        early = {"bin_acc": 0.60, "mse": 2.00, "valid_count": 45}
+        late  = {"bin_acc": 0.82, "mse": 1.10, "valid_count": 45}
+        log = self._write_log(self._sentinel(early) + self._sentinel(late))
+        metrics = _parse_eval_metrics(log)
+        assert metrics["bin_acc"] == 0.82
+        assert metrics["mse"] == 1.10
+
+    def test_returns_empty_dict_if_no_sentinel(self):
+        """Should return {} when the log contains no EVAL_METRICS_JSON line."""
+        log = self._write_log(
+            "Training started\n"
+            "Binary Accuracy: 0.78  |  Mean Square Error: 1.23\n"  # old format — not parsed
+            "Done.\n"
+        )
+        metrics = _parse_eval_metrics(log)
+        assert metrics == {}
+
+    def test_returns_empty_dict_for_missing_file(self):
+        """Should return {} gracefully when the log file does not exist."""
+        metrics = _parse_eval_metrics("nonexistent_training.log")
+        assert metrics == {}
+
+
+class TestSaveEvalHistory:
+    """Test _save_eval_history() persistence."""
+
+    def setup_method(self):
+        self.test_dir = tempfile.mkdtemp(prefix="cron_test_")
+        self.original_dir = os.getcwd()
+        os.chdir(self.test_dir)
+
+    def teardown_method(self):
+        os.chdir(self.original_dir)
+        shutil.rmtree(self.test_dir)
+
+    def test_creates_new_file_with_correct_structure(self):
+        """Should create evaluation_history.json with the first entry."""
+        _save_eval_history("2026-03-01T02:00:00", 1, "/models/run1",
+                           {"bin_acc": 0.78, "mse": 1.23})
+
+        assert os.path.exists("evaluation_history.json")
+        with open("evaluation_history.json") as f:
+            data = json.load(f)
+        assert "history" in data
+        assert len(data["history"]) == 1
+        entry = data["history"][0]
+        assert entry["run_time"] == "2026-03-01T02:00:00"
+        assert entry["num_datasets"] == 1
+        assert entry["model_path"] == "/models/run1"
+        assert entry["bin_acc"] == 0.78
+        assert entry["mse"] == 1.23
+
+    def test_appends_to_existing_file(self):
+        """Each call should append a new record without overwriting previous ones."""
+        _save_eval_history("2026-03-01T02:00:00", 1, "/models/run1", {"bin_acc": 0.70})
+        _save_eval_history("2026-03-08T02:00:00", 2, "/models/run2", {"bin_acc": 0.78})
+
+        with open("evaluation_history.json") as f:
+            data = json.load(f)
+        assert len(data["history"]) == 2
+        assert data["history"][0]["model_path"] == "/models/run1"
+        assert data["history"][1]["model_path"] == "/models/run2"
+        assert data["history"][1]["num_datasets"] == 2
+
+    def test_handles_empty_metrics_gracefully(self):
+        """An empty metrics dict (no eval found) should still create a valid entry."""
+        _save_eval_history("2026-03-01T02:00:00", 1, "/models/run1", {})
+
+        with open("evaluation_history.json") as f:
+            data = json.load(f)
+        entry = data["history"][0]
+        assert entry["run_time"] == "2026-03-01T02:00:00"
+        assert "bin_acc" not in entry
+        assert "mse" not in entry
 
 
 if __name__ == "__main__":

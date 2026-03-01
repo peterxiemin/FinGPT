@@ -13,6 +13,10 @@ lora_module_dict = {
         'o_proj', 'gate_proj', 'up_proj', 'down_proj',
         # 'embed_tokens', 'lm_head',
     ],
+    'llama3': [
+        'q_proj', 'k_proj', 'v_proj',
+        'o_proj', 'gate_proj', 'up_proj', 'down_proj',
+    ],
 }
 
 
@@ -50,6 +54,8 @@ def parse_model_name(name, from_remote=False):
         return 'THUDM/chatglm2-6b' if from_remote else 'base_models/chatglm2-6b'
     elif name == 'llama2':
         return 'meta-llama/Llama-2-7b-chat-hf' # if from_remote else 'base_models/Llama-2-7b-chat-hf'
+    elif name == 'llama3':
+        return 'meta-llama/Meta-Llama-3.1-8B-Instruct' if from_remote else '/model/llm/Meta-Llama-3.1-8B-Instruct'
     else:
         raise ValueError(f"Undefined base model {name}")
         

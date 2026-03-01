@@ -200,17 +200,25 @@ def get_basics(symbol, data, start_date, always=False):
     
 
 def prepare_data_for_symbol(symbol, data_dir, start_date, end_date, with_basics=True):
-    
+    suffix = "" if with_basics else "_nobasics"
+    csv_path = f"{data_dir}/{symbol}_{start_date}_{end_date}{suffix}.csv"
+
+    # Cache hit: raw data already on disk — skip all API calls
+    if os.path.exists(csv_path):
+        cached = pd.read_csv(csv_path, index_col=0, parse_dates=['Start Date', 'End Date'])
+        if len(cached) > 0:
+            print(f"  [cache] {symbol}: raw data loaded from disk, skipping API calls")
+            return cached
+
     data = get_returns(symbol, start_date, end_date)
     data = get_news(symbol, data)
-    
+
     if with_basics:
         data = get_basics(symbol, data, start_date)
-        data.to_csv(f"{data_dir}/{symbol}_{start_date}_{end_date}.csv")
     else:
         data['Basics'] = [json.dumps({})] * len(data)
-        data.to_csv(f"{data_dir}/{symbol}_{start_date}_{end_date}_nobasics.csv")
-    
+
+    data.to_csv(csv_path)
     return data
 
 

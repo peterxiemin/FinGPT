@@ -5,6 +5,7 @@ from transformers import TrainerCallback, TrainerState, TrainerControl
 from transformers.trainer import TRAINING_ARGS_NAME
 from torch.utils.tensorboard import SummaryWriter
 import datasets
+import json
 import torch
 import os
 import re
@@ -77,13 +78,18 @@ class GenerationEvalCallback(TrainerCallback):
                 # print("REFERENCE: ", gt)
 
             metrics = calc_metrics(reference_texts, generated_texts)
-            
+
+            # Emit a sentinel line so cron_pipeline.py can capture all eval metrics
+            # from the training log without relying on wandb (which may be disabled).
+            if metrics:
+                print(f"EVAL_METRICS_JSON: {json.dumps(metrics)}", flush=True)
+
             # Ensure wandb is initialized
             if wandb.run is None:
                 wandb.init()
-                
+
             wandb.log(metrics, step=state.global_step)
-            torch.cuda.empty_cache()            
+            torch.cuda.empty_cache()
 
 
 def main(args):

@@ -27,9 +27,12 @@ def get_time_window(weeks_back=2):
 
     On first run: returns [now - weeks_back, now]
     On subsequent runs: returns [last_run_end_date, now] to avoid data overlap
+
+    Returns (start_date_str, end_date_str, existing_dataset_paths).
     """
     checkpoint_file = "pipeline_checkpoint.json"
-    end_date = datetime.now()
+    end_date_str = datetime.now().strftime("%Y-%m-%d")
+    existing_dataset_paths = []
 
     # Check if we have a previous checkpoint
     if os.path.exists(checkpoint_file):
@@ -37,37 +40,115 @@ def get_time_window(weeks_back=2):
             with open(checkpoint_file, 'r') as f:
                 checkpoint = json.load(f)
                 # Start from where the last run ended to avoid overlap
-                start_date = datetime.fromisoformat(checkpoint["last_end_date"])
-                logger.info(f"Using checkpoint: last run ended at {checkpoint['last_end_date']}")
+                start_date_str = checkpoint["last_end_date"]
+                existing_dataset_paths = checkpoint.get("dataset_paths", [])
+                logger.info(f"Using checkpoint: last run ended at {start_date_str}, "
+                            f"{len(existing_dataset_paths)} historical dataset(s) recorded")
         except (json.JSONDecodeError, KeyError, ValueError) as e:
             logger.warning(f"Checkpoint file corrupted ({e}); falling back to weeks_back={weeks_back}")
-            start_date = end_date - timedelta(days=7 * weeks_back)
+            start_date_str = (datetime.now() - timedelta(days=7 * weeks_back)).strftime("%Y-%m-%d")
     else:
         # First run: look back weeks_back weeks
         logger.info(f"No checkpoint found; looking back {weeks_back} weeks")
-        start_date = end_date - timedelta(days=7 * weeks_back)
+        start_date_str = (datetime.now() - timedelta(days=7 * weeks_back)).strftime("%Y-%m-%d")
 
-    # Save checkpoint for next run
+    # Save checkpoint for next run, preserving existing dataset_paths
     try:
         with open(checkpoint_file, 'w') as f:
             json.dump({
-                "last_end_date": end_date.isoformat(),
+                "last_end_date": end_date_str,
                 "last_run_time": datetime.now().isoformat(),
-                "index_name": "dow"  # Will be updated by step1_to_3_data_pipeline
+                "index_name": "dow",
+                "dataset_paths": existing_dataset_paths,
             }, f, indent=2)
-        logger.info(f"Updated checkpoint: next run will start from {end_date.isoformat()}")
+        logger.info(f"Updated checkpoint: next run will start from {end_date_str}")
     except Exception as e:
         logger.error(f"Failed to save checkpoint: {e}")
 
-    return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+    return start_date_str, end_date_str, existing_dataset_paths
 
 
-def step1_to_3_data_pipeline(index_name="dow", weeks_back=2):
-    """Run steps 1, 2, and 3: Acquire data, LLM analysis, and HF dataset creation."""
+def _update_checkpoint_dataset_paths(dataset_paths):
+    """Update only the dataset_paths field in the checkpoint file."""
+    checkpoint_file = "pipeline_checkpoint.json"
+    try:
+        checkpoint = {}
+        if os.path.exists(checkpoint_file):
+            with open(checkpoint_file, 'r') as f:
+                checkpoint = json.load(f)
+        checkpoint["dataset_paths"] = dataset_paths
+        with open(checkpoint_file, 'w') as f:
+            json.dump(checkpoint, f, indent=2)
+        logger.info(f"Checkpoint updated: {len(dataset_paths)} dataset path(s) recorded.")
+    except Exception as e:
+        logger.error(f"Failed to update checkpoint dataset_paths: {e}")
+
+
+def _parse_eval_metrics(training_log):
+    """Extract evaluation metrics from a training log file.
+
+    train_lora.py emits a sentinel line after every GenerationEvalCallback run:
+        EVAL_METRICS_JSON: {"bin_acc": 0.78, "mse": 1.23, "valid_count": 45,
+                            "pros_rouge_scores": {...}, ...}
+
+    This function returns the metrics from the LAST such sentinel (i.e. the final
+    evaluation checkpoint).  Returns {} if no sentinel is found or the file is missing.
+    """
+    metrics = {}
+    try:
+        with open(training_log, 'r') as f:
+            for line in f:
+                if line.startswith("EVAL_METRICS_JSON:"):
+                    payload = line.split("EVAL_METRICS_JSON:", 1)[1].strip()
+                    metrics = json.loads(payload)   # last line wins
+    except Exception as e:
+        logger.warning(f"Could not parse eval metrics from {training_log}: {e}")
+    if metrics:
+        logger.info(
+            f"Parsed eval metrics: bin_acc={metrics.get('bin_acc')}, "
+            f"mse={metrics.get('mse')}, valid_count={metrics.get('valid_count')}"
+        )
+    else:
+        logger.warning(f"No EVAL_METRICS_JSON sentinel found in {training_log}.")
+    return metrics
+
+
+def _save_eval_history(run_time, num_datasets, model_path, metrics):
+    """Append one evaluation record to evaluation_history.json."""
+    eval_file = "evaluation_history.json"
+    try:
+        history = {"history": []}
+        if os.path.exists(eval_file):
+            with open(eval_file, 'r') as f:
+                history = json.load(f)
+        entry = {
+            "run_time": run_time,
+            "num_datasets": num_datasets,
+            "model_path": model_path,
+        }
+        entry.update(metrics)
+        history["history"].append(entry)
+        with open(eval_file, 'w') as f:
+            json.dump(history, f, indent=2)
+        logger.info(f"Evaluation history saved: {entry}")
+    except Exception as e:
+        logger.error(f"Failed to save evaluation history: {e}")
+
+
+def step1_to_3_data_pipeline(index_name="dow", start_date=None, end_date=None,
+                              existing_dataset_paths=None):
+    """Run steps 1, 2, and 3: Acquire data, LLM analysis, and HF dataset creation.
+
+    Returns (success, all_dataset_paths) where all_dataset_paths is the cumulative
+    list of existing paths plus the newly created dataset path.
+    """
     logger.info("=== Starting Phase: Data Pipeline (Steps 1-3) ===")
 
-    start_date, end_date = get_time_window(weeks_back)
+    if existing_dataset_paths is None:
+        existing_dataset_paths = []
+
     logger.info(f"Time window: {start_date} to {end_date}")
+    logger.info(f"Existing historical datasets: {len(existing_dataset_paths)}")
 
     args = {
         'index_name': index_name,
@@ -83,29 +164,38 @@ def step1_to_3_data_pipeline(index_name="dow", weeks_back=2):
         dataset_path = run_data_pipeline(args)
         if not dataset_path or not os.path.exists(dataset_path):
             logger.error(f"Dataset path returned by pipeline not found: {dataset_path}")
-            return False, None
+            return False, existing_dataset_paths
 
-        logger.info(f"Data pipeline completed. Dataset verified at: {dataset_path}")
-        return True, dataset_path
+        all_dataset_paths = existing_dataset_paths + [dataset_path]
+        logger.info(f"Data pipeline completed. New dataset: {dataset_path}")
+        logger.info(f"Cumulative dataset count: {len(all_dataset_paths)}")
+        return True, all_dataset_paths
 
     except Exception as e:
         logger.error(f"Data pipeline failed: {e}", exc_info=True)
-        return False, None
+        return False, existing_dataset_paths
 
 
-def step4_train_lora(dataset_path):
-    """Run step 4: LoRA Fine-tuning, streaming output to a timestamped log."""
+def step4_train_lora(dataset_paths):
+    """Run step 4: LoRA Fine-tuning on all cumulative datasets.
+
+    dataset_paths: list of dataset directory paths (all historical + new).
+    Training log is parsed for eval metrics which are persisted to evaluation_history.json.
+    """
     logger.info("=== Starting Phase: Model Fine-tuning (Step 4) ===")
-    logger.info(f"Using dataset: {dataset_path}")
+
+    combined = ",".join(dataset_paths)
+    logger.info(f"Training on {len(dataset_paths)} dataset(s): {combined}")
 
     run_name = f"auto-finetune-{datetime.now().strftime('%Y%m%d%H%M')}"
     training_log = f"training_{datetime.now().strftime('%Y%m%d%H%M')}.log"
+    run_time = datetime.now().isoformat()
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
 
     cmd = [
         "python", "train_lora.py",
-        "--dataset", dataset_path,
+        "--dataset", combined,
         "--base_model", "llama3",
         "--run_name", run_name,
         "--num_epochs", "3",
@@ -126,7 +216,7 @@ def step4_train_lora(dataset_path):
 
         # Stream stdout/stderr directly to the log file instead of buffering in memory
         with open(training_log, 'w') as log_fh:
-            result = subprocess.run(
+            subprocess.run(
                 cmd,
                 env=env,
                 check=True,
@@ -144,25 +234,28 @@ def step4_train_lora(dataset_path):
                     model_path = line.split("TRAINED_MODEL_PATH:", 1)[1].strip()
                     break
 
-        if model_path and os.path.isdir(model_path):
+        if not (model_path and os.path.isdir(model_path)):
+            # Fallback: find latest subdir by mtime
+            logger.warning("TRAINED_MODEL_PATH sentinel not found; falling back to mtime scan.")
+            models_dir = "./finetuned_models"
+            subdirs = [
+                os.path.join(models_dir, d)
+                for d in os.listdir(models_dir)
+                if os.path.isdir(os.path.join(models_dir, d))
+            ]
+            if not subdirs:
+                logger.error("No finetuned models found in ./finetuned_models.")
+                return False, None
+            model_path = max(subdirs, key=os.path.getmtime)
+            logger.info(f"Latest finetuned model (mtime fallback): {model_path}")
+        else:
             logger.info(f"Model path from sentinel: {model_path}")
-            return True, model_path
 
-        # Fallback: find latest subdir by mtime
-        logger.warning("TRAINED_MODEL_PATH sentinel not found; falling back to mtime scan.")
-        models_dir = "./finetuned_models"
-        subdirs = [
-            os.path.join(models_dir, d)
-            for d in os.listdir(models_dir)
-            if os.path.isdir(os.path.join(models_dir, d))
-        ]
-        if not subdirs:
-            logger.error("No finetuned models found in ./finetuned_models.")
-            return False, None
+        # Parse eval metrics from training log and persist them
+        metrics = _parse_eval_metrics(training_log)
+        _save_eval_history(run_time, len(dataset_paths), model_path, metrics)
 
-        latest_model = max(subdirs, key=os.path.getmtime)
-        logger.info(f"Latest finetuned model (mtime fallback): {latest_model}")
-        return True, latest_model
+        return True, model_path
 
     except subprocess.CalledProcessError as e:
         logger.error(f"Training failed with exit code {e.returncode}. See {training_log} for details.")
@@ -238,14 +331,25 @@ def run_cron(index_name="dow", weeks_back=2):
     logger.info("=========================================")
     logger.info(f"Starting Scheduled Pipeline Run at {datetime.now()}")
 
-    # Steps 1-3
-    success, dataset_path = step1_to_3_data_pipeline(index_name=index_name, weeks_back=weeks_back)
+    # Determine time window and load cumulative dataset history
+    start_date, end_date, existing_paths = get_time_window(weeks_back)
+
+    # Steps 1-3: acquire new data and append to cumulative path list
+    success, all_paths = step1_to_3_data_pipeline(
+        index_name=index_name,
+        start_date=start_date,
+        end_date=end_date,
+        existing_dataset_paths=existing_paths,
+    )
     if not success:
         logger.error("Pipeline aborted at Data Pipeline phase.")
         return
 
-    # Step 4
-    success, model_path = step4_train_lora(dataset_path)
+    # Persist the updated cumulative dataset list to checkpoint
+    _update_checkpoint_dataset_paths(all_paths)
+
+    # Step 4: train on ALL cumulative datasets
+    success, model_path = step4_train_lora(all_paths)
     if not success:
         logger.error("Pipeline aborted at Training phase.")
         return
