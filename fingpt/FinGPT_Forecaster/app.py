@@ -27,8 +27,9 @@ access_token = os.environ["HF_TOKEN"]
 proxy = os.environ.get("HTTP_PROXY")
 proxies = {'http': proxy, 'https': proxy} if proxy else None
 
-# Note: yfinance no longer supports set_config() in recent versions
-# Proxy configuration for yfinance is handled via environment variables if needed
+# Configure yfinance proxy globally (yfinance 0.2.50+)
+if proxy:
+    yf.set_config(proxy=proxy)
 
 finnhub_client = finnhub.Client(
     api_key=os.environ.get("FINNHUB_API_KEY", os.environ.get("FINNHUB_KEY")),
@@ -110,11 +111,17 @@ def n_weeks_before(date_string, n):
 
 def get_stock_data(stock_symbol, steps):
 
-    try:
-        yfinance_limiter.wait_if_needed()
-        stock_data = yf.download(stock_symbol, steps[0], steps[-1], proxy=proxy)
-    except Exception as e:
-        raise gr.Error(f"Failed to download stock price data for symbol {stock_symbol} from yfinance! Error: {str(e)}")
+    stock_data = None
+    for attempt in range(3):
+        try:
+            yfinance_limiter.wait_if_needed()
+            stock_data = yf.download(stock_symbol, steps[0], steps[-1])
+            break
+        except Exception as e:
+            if attempt < 2:
+                time.sleep(5 * (attempt + 1))
+            else:
+                raise gr.Error(f"Failed to download stock price data for symbol {stock_symbol} from yfinance! Error: {str(e)}")
 
     if len(stock_data) == 0:
         raise gr.Error(f"Failed to download stock price data for symbol {stock_symbol} from yfinance!")

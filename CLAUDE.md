@@ -10,6 +10,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 FinGPT is an open-source financial LLM framework by AI4Finance Foundation. It provides full-stack tools for financial NLP including sentiment analysis, stock price forecasting, RAG, and multi-agent systems. The most actively developed module is **FinGPT_Forecaster**.
 
+## Python Environment
+
+**Always use the fingpt conda environment Python interpreter:**
+
+```
+/usr/local/miniconda3/envs/fingpt/bin/python
+```
+
+All Python commands, test runs, and scripts must use this interpreter. Never use system `python` or `python3` directly.
+
 ## Commands
 
 ### Running Tests (FinGPT_Forecaster)

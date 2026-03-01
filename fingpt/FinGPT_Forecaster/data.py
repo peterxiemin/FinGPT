@@ -29,8 +29,9 @@ from rate_limiter import finnhub_limiter, yfinance_limiter, openrouter_limiter
 proxy = os.environ.get("HTTP_PROXY")
 proxies = {'http': proxy, 'https': proxy} if proxy else None
 
-# Note: yfinance no longer supports set_config() in recent versions
-# Proxy configuration is handled automatically via HTTP_PROXY/HTTPS_PROXY environment variables
+# Configure yfinance proxy globally (yfinance 0.2.50+)
+if proxy:
+    yf.set_config(proxy=proxy)
 
 finnhub_client: finnhub.Client = finnhub.Client(
     api_key=os.environ.get("FINNHUB_KEY"),
@@ -63,8 +64,8 @@ def get_returns(stock_symbol, start_date, end_date):
     # Global Rate Limit for yfinance
     yfinance_limiter.wait_if_needed()
 
-    # Download historical stock data (with proxy if configured)
-    stock_data = yf.download(stock_symbol, start=start_date, end=end_date, proxy=proxy)
+    # Download historical stock data (proxy set globally via yf.set_config)
+    stock_data = yf.download(stock_symbol, start=start_date, end=end_date)
     
     if isinstance(stock_data.columns, pd.MultiIndex):
         stock_data.columns = stock_data.columns.get_level_values(0)
