@@ -42,7 +42,7 @@ class RateLimiter:
             
 # 预定义各个服务的限制
 # Finnhub Free Tier: 30 calls/minute (平均 1次/2秒)
-# yfinance: 虽无明确限制，但高频请求易被封IP，建议 1次/1秒
+# yfinance: 虽无明确限制，但高频请求易被封IP，建议 1次/1秒（或更长以避免限流）
 finnhub_limiter = RateLimiter("finnhub", max_calls=30, period_seconds=60)
-yfinance_limiter = RateLimiter("yfinance", max_calls=1, period_seconds=1)
+yfinance_limiter = RateLimiter("yfinance", max_calls=1, period_seconds=2)  # 增加到 1次/2秒以避免限流
 openrouter_limiter = RateLimiter("openrouter", max_calls=50, period_seconds=60)

@@ -59,12 +59,12 @@ def bin_mapping(ret):
 
 def get_returns(stock_symbol, start_date, end_date):
     # TODO: likely to be merged with get_stock_data
-    
+
     # Global Rate Limit for yfinance
     yfinance_limiter.wait_if_needed()
-    
-    # Download historical stock data
-    stock_data = yf.download(stock_symbol, start=start_date, end=end_date)
+
+    # Download historical stock data (with proxy if configured)
+    stock_data = yf.download(stock_symbol, start=start_date, end=end_date, proxy=proxy)
     
     if isinstance(stock_data.columns, pd.MultiIndex):
         stock_data.columns = stock_data.columns.get_level_values(0)

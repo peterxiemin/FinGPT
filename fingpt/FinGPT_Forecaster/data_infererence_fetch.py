@@ -42,7 +42,7 @@ def get_stock_data(stock_symbol, steps):
 
     try:
         yfinance_limiter.wait_if_needed()
-        stock_data = yf.download(stock_symbol, steps[0], steps[-1])
+        stock_data = yf.download(stock_symbol, steps[0], steps[-1], proxy=proxy)
     except Exception as e:
         print(f"Failed to download stock price data for symbol {stock_symbol} from yfinance! Error: {str(e)}")
         return pd.DataFrame()

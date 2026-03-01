@@ -11,8 +11,10 @@ case "$1" in
     start)
         echo "正在启动 FinGPT Forecaster..."
         # Load all variables from .env uniformly
-        set -a; source .env; set +a
+        set -a; . "$APP_DIR/.env"; set +a
         export HF_ENDPOINT=https://hf-mirror.com
+        # Exclude localhost from proxy to prevent Gradio startup issues
+        export NO_PROXY="localhost,127.0.0.1,::1"
 
         # 启动程序并重定向日志
         nohup $PYTHON_BIN -u app.py > $LOG_FILE 2>&1 &

@@ -4,6 +4,7 @@ import random
 import finnhub
 import yfinance as yf
 import pandas as pd
+import requests
 from openai import OpenAI
 
 from indices import *
@@ -17,7 +18,11 @@ proxy = os.environ.get("HTTP_PROXY")
 proxies = {'http': proxy, 'https': proxy} if proxy else None
 
 # Note: yfinance no longer supports set_config() in recent versions
-# Proxy configuration is handled automatically via HTTP_PROXY/HTTPS_PROXY environment variables
+# Create a requests session with proxy for yfinance to use
+session = None
+if proxy:
+    session = requests.Session()
+    session.proxies.update(proxies)
 
 finnhub_client = finnhub.Client(
     api_key=os.environ.get("FINNHUB_KEY"),
@@ -41,7 +46,7 @@ def get_company_prompt(symbol):
 def get_crypto_prompt(symbol):
 
     yfinance_limiter.wait_if_needed()
-    profile = yf.Ticker(symbol).info
+    profile = yf.Ticker(symbol, session=session).info
 
     crpyto_template = """[Cryptocurrency Introduction]: {description}. It has a market capilization of {marketCap}."""
     

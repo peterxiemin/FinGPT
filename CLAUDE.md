@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## IMPORTANT: Git Rules
+
+**Never push or submit any changes to the upstream repository (`AI4Finance-Foundation/FinGPT`).** All changes must only go to the fork (`peterxiemin/FinGPT`). Never create PRs targeting the upstream repo.
+
 ## Project Overview
 
 FinGPT is an open-source financial LLM framework by AI4Finance Foundation. It provides full-stack tools for financial NLP including sentiment analysis, stock price forecasting, RAG, and multi-agent systems. The most actively developed module is **FinGPT_Forecaster**.
